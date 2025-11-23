@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const fetch = require('node-fetch');
 const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
@@ -12,45 +11,63 @@ const PORT = process.env.PORT || 4000;
 app.use(cors());
 app.use(express.json());
 
-// Configuration
-const LICENSE_SERVER_URL = process.env.LICENSE_SERVER_URL || 'http://localhost:3000';
-
 // Health check endpoint
 app.get('/', (req, res) => {
+  console.log(`[${new Date().toISOString()}] GET / - Health check request from ${req.ip}`);
   res.json({ 
-    message: 'License Activation Middleware Server is running',
-    licenseServerUrl: LICENSE_SERVER_URL
+    message: 'License Activation Server is running'
   });
 });
 
-// Endpoint for client local servers to send requests
-app.post('/api/requests', async (req, res) => {
+// Endpoint for client to send license requests
+app.post('/api/license-request', async (req, res) => {
   try {
-    const { method, url, headers, body } = req.body;
+    console.log(`[${new Date().toISOString()}] POST /api/license-request - New license request received`);
+    console.log(`  Source IP: ${req.ip}`);
+    console.log(`  User Agent: ${req.get('User-Agent')}`);
+    console.log(`  Request Body:`, req.body);
     
-    // Store request data in database
+    const { productKey, email, machineId, username } = req.body;
+    
+    // Validate request - either email or username is required
+    if (!productKey || (!email && !username) || !machineId) {
+      console.log(`  Validation failed - Missing required fields`);
+      return res.status(400).json({ error: 'Missing required fields: productKey, (email or username), machineId' });
+    }
+    
+    // Store license request in database as PENDING
+    // If username is provided, use it; otherwise use email
+    const userIdentifier = username || email;
+    
     const request = await prisma.request.create({
       data: {
-        method,
-        url,
-        headers: JSON.stringify(headers),
-        body: JSON.stringify(body)
+        method: 'LICENSE_REQUEST',
+        url: '/api/license-request',
+        headers: JSON.stringify(req.headers),
+        body: JSON.stringify({ productKey, email, machineId, username }),
+        status: 'pending'
       }
     });
     
+    console.log(`  Request stored successfully with ID: ${request.id}`);
+    
     res.json({ 
-      message: 'Request stored successfully', 
+      message: 'License request submitted successfully', 
       requestId: request.id 
     });
   } catch (error) {
-    console.error('Error inserting request:', error);
-    res.status(500).json({ error: 'Failed to store request' });
+    console.error(`[${new Date().toISOString()}] Error submitting license request:`, error);
+    res.status(500).json({ error: 'Failed to submit license request' });
   }
 });
 
-// Endpoint for your local server to poll for pending requests
-app.get('/api/requests/pending', async (req, res) => {
+// Endpoint for local server to fetch pending requests
+app.get('/api/pending', async (req, res) => {
   try {
+    console.log(`[${new Date().toISOString()}] GET /api/pending - Fetch pending requests`);
+    console.log(`  Source IP: ${req.ip}`);
+    console.log(`  User Agent: ${req.get('User-Agent')}`);
+    
     // Get pending requests from database
     const requests = await prisma.request.findMany({
       where: {
@@ -61,221 +78,146 @@ app.get('/api/requests/pending', async (req, res) => {
       }
     });
     
+    console.log(`  Found ${requests.length} pending requests`);
+    
     res.json(requests);
   } catch (error) {
-    console.error('Error retrieving pending requests:', error);
+    console.error(`[${new Date().toISOString()}] Error retrieving pending requests:`, error);
     res.status(500).json({ error: 'Failed to retrieve pending requests' });
   }
 });
 
-// Endpoint for your local server to submit responses
-app.post('/api/responses', async (req, res) => {
+// Endpoint for local server to send back processed results
+app.post('/api/resolve', async (req, res) => {
   try {
-    const { requestId, status, data } = req.body;
+    console.log(`[${new Date().toISOString()}] POST /api/resolve - Process license result`);
+    console.log(`  Source IP: ${req.ip}`);
+    console.log(`  User Agent: ${req.get('User-Agent')}`);
+    console.log(`  Request Body:`, req.body);
     
-    // Update request with response data
-    const request = await prisma.request.update({
-      where: {
-        id: parseInt(requestId)
-      },
-      data: {
-        status: 'completed',
-        response: JSON.stringify(data),
-        responseStatus: status
-      }
-    });
+    const { requestId, licenseKey, rejected } = req.body;
     
-    res.json({ message: 'Response recorded successfully' });
+    // Validate request
+    if (!requestId) {
+      console.log(`  Validation failed - Missing requestId`);
+      return res.status(400).json({ error: 'Missing required field: requestId' });
+    }
+    
+    if (rejected) {
+      console.log(`  Processing rejection for request ID: ${requestId}`);
+      // Handle rejected request
+      const request = await prisma.request.update({
+        where: {
+          id: parseInt(requestId)
+        },
+        data: {
+          status: 'rejected',
+          response: JSON.stringify({ error: 'License request was rejected' }),
+          responseStatus: 403
+        }
+      });
+      
+      console.log(`  Request ${requestId} marked as rejected`);
+      res.json({ message: 'Request rejection recorded successfully' });
+    } else if (licenseKey) {
+      console.log(`  Processing license key for request ID: ${requestId}`);
+      // Handle successful license generation
+      const request = await prisma.request.update({
+        where: {
+          id: parseInt(requestId)
+        },
+        data: {
+          status: 'completed',
+          response: JSON.stringify({ licenseKey }),
+          responseStatus: 200
+        }
+      });
+      
+      console.log(`  License key recorded for request ${requestId}`);
+      res.json({ message: 'License key recorded successfully' });
+    } else {
+      console.log(`  Validation failed - Either licenseKey or rejected must be provided`);
+      return res.status(400).json({ error: 'Either licenseKey or rejected must be provided' });
+    }
   } catch (error) {
-    console.error('Error updating request:', error);
+    console.error(`[${new Date().toISOString()}] Error recording license key:`, error);
     if (error.code === 'P2025') {
       return res.status(404).json({ error: 'Request not found' });
     }
-    res.status(500).json({ error: 'Failed to update request' });
+    res.status(500).json({ error: 'Failed to record license key' });
   }
 });
 
-// Endpoint for client local servers to get responses
-app.get('/api/responses/:requestId', async (req, res) => {
+// Endpoint for client to check license status and get result
+app.get('/api/license-result/:requestId', async (req, res) => {
   try {
     const requestId = parseInt(req.params.requestId);
+    console.log(`[${new Date().toISOString()}] GET /api/license-result/${requestId} - Check license result`);
+    console.log(`  Source IP: ${req.ip}`);
+    console.log(`  User Agent: ${req.get('User-Agent')}`);
     
-    // Get completed request with response
+    // Get request with response
     const request = await prisma.request.findUnique({
       where: {
-        id: requestId,
-        status: 'completed'
+        id: requestId
       }
     });
     
     if (!request) {
-      return res.status(404).json({ error: 'Response not found or not completed yet' });
+      console.log(`  Request ${requestId} not found`);
+      return res.status(404).json({ error: 'Request not found' });
     }
     
-    res.json({
-      status: request.responseStatus,
-      data: JSON.parse(request.response)
-    });
+    console.log(`  Request ${requestId} found with status: ${request.status}`);
+    
+    // If request is still pending, return appropriate message
+    if (request.status === 'pending') {
+      console.log(`  Request ${requestId} is still pending`);
+      return res.json({ 
+        status: 'pending', 
+        message: 'License request is still being processed' 
+      });
+    }
+    
+    // If request is rejected, return rejection message
+    if (request.status === 'rejected') {
+      console.log(`  Request ${requestId} was rejected`);
+      return res.json({
+        status: 'rejected',
+        message: 'License request was rejected'
+      });
+    }
+    
+    // If request is completed, return the license key
+    if (request.status === 'completed') {
+      console.log(`  Request ${requestId} completed, returning license key`);
+      return res.json({
+        status: 'completed',
+        licenseKey: JSON.parse(request.response).licenseKey
+      });
+    }
+    
+    console.log(`  Unknown request status for ${requestId}: ${request.status}`);
+    res.status(500).json({ error: 'Unknown request status' });
   } catch (error) {
-    console.error('Error retrieving response:', error);
-    res.status(500).json({ error: 'Failed to retrieve response' });
+    console.error(`[${new Date().toISOString()}] Error retrieving license result:`, error);
+    res.status(500).json({ error: 'Failed to retrieve license result' });
   }
 });
 
-// Legacy endpoints for backward compatibility
-// Forward activation requests to the license server
-app.post('/api/activate', async (req, res) => {
-  try {
-    console.log('Forwarding activation request to license server...');
-    
-    const response = await fetch(`${LICENSE_SERVER_URL}/api/activate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-activation-secret': req.headers['x-activation-secret'] || 'change-this-to-a-strong-secret'
-      },
-      body: JSON.stringify(req.body)
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    console.error('Error forwarding activation request:', error);
-    res.status(500).json({ error: 'Failed to forward activation request' });
-  }
-});
-
-// Forward user approval requests to the license server
-app.post('/api/users/:id/approve', async (req, res) => {
-  try {
-    console.log(`Forwarding approval request for user ${req.params.id} to license server...`);
-    
-    const response = await fetch(`${LICENSE_SERVER_URL}/api/users/${req.params.id}/approve`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(req.body)
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    console.error('Error forwarding approval request:', error);
-    res.status(500).json({ error: 'Failed to forward approval request' });
-  }
-});
-
-// Forward key generation requests to the license server
-app.post('/api/users/:id/generate-key', async (req, res) => {
-  try {
-    console.log(`Forwarding key generation request for user ${req.params.id} to license server...`);
-    
-    const response = await fetch(`${LICENSE_SERVER_URL}/api/users/${req.params.id}/generate-key`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(req.body)
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    console.error('Error forwarding key generation request:', error);
-    res.status(500).json({ error: 'Failed to forward key generation request' });
-  }
-});
-
-// Forward user rejection requests to the license server
-app.post('/api/users/:id/reject', async (req, res) => {
-  try {
-    console.log(`Forwarding rejection request for user ${req.params.id} to license server...`);
-    
-    const response = await fetch(`${LICENSE_SERVER_URL}/api/users/${req.params.id}/reject`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(req.body)
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    console.error('Error forwarding rejection request:', error);
-    res.status(500).json({ error: 'Failed to forward rejection request' });
-  }
-});
-
-// Forward key retrieval requests to the license server
-app.get('/api/users/:id/key', async (req, res) => {
-  try {
-    console.log(`Forwarding key retrieval request for user ${req.params.id} to license server...`);
-    
-    const response = await fetch(`${LICENSE_SERVER_URL}/api/users/${req.params.id}/key`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    console.error('Error forwarding key retrieval request:', error);
-    res.status(500).json({ error: 'Failed to forward key retrieval request' });
-  }
-});
-
-// Forward user retrieval requests to the license server
-app.get('/api/users/:id', async (req, res) => {
-  try {
-    console.log(`Forwarding user retrieval request for user ${req.params.id} to license server...`);
-    
-    const response = await fetch(`${LICENSE_SERVER_URL}/api/users/${req.params.id}`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    console.error('Error forwarding user retrieval request:', error);
-    res.status(500).json({ error: 'Failed to forward user retrieval request' });
-  }
-});
-
-// Forward all users retrieval requests to the license server
-app.get('/api/users', async (req, res) => {
-  try {
-    console.log('Forwarding all users retrieval request to license server...');
-    
-    const response = await fetch(`${LICENSE_SERVER_URL}/api/users`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-    
-    const data = await response.json();
-    res.status(response.status).json(data);
-  } catch (error) {
-    console.error('Error forwarding all users retrieval request:', error);
-    res.status(500).json({ error: 'Failed to forward all users retrieval request' });
-  }
+// Health check endpoint for local server
+app.get('/health', (req, res) => {
+  console.log(`[${new Date().toISOString()}] GET /health - Local server health check from ${req.ip}`);
+  res.json({ message: 'Online server is running' });
 });
 
 app.listen(PORT, async () => {
-  console.log(`License Activation Middleware Server is running on port ${PORT}`);
-  console.log(`Forwarding requests to: ${LICENSE_SERVER_URL}`);
+  console.log(`[${new Date().toISOString()}] License Activation Server is running on port ${PORT}`);
   
   try {
     await prisma.$connect();
-    console.log('Connected to database');
+    console.log(`[${new Date().toISOString()}] Connected to database`);
   } catch (error) {
-    console.error('Failed to connect to database:', error);
+    console.error(`[${new Date().toISOString()}] Failed to connect to database:`, error);
   }
 });

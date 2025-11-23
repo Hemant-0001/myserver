@@ -1,62 +1,118 @@
-# License Activation Middleware Server
+# License Activation Server
 
-This is a completely independent middleware server that acts as an intermediary between your client applications and the license activation server.
-
-## Features
-
-- Forwards all license activation API requests to the main license server
-- Completely independent with its own dependencies
-- Can be hosted separately from the main license server
-- Supports CORS for web client requests
-
-## Setup
-
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-2. Configure the license server URL (optional):
-   ```bash
-   export LICENSE_SERVER_URL=http://your-license-server.com
-   ```
-   Or on Windows:
-   ```cmd
-   set LICENSE_SERVER_URL=http://your-license-server.com
-   ```
-
-3. Start the server:
-   ```bash
-   npm start
-   ```
-   
-   For development with auto-restart:
-   ```bash
-   npm run dev
-   ```
+This server handles license requests from clients and manages the communication between clients and the local activation server.
 
 ## API Endpoints
 
-All requests are forwarded to the corresponding endpoints on the license server:
+### Client Endpoints
 
-- `POST /api/activate` - Forward activation requests
-- `POST /api/users/:id/approve` - Forward user approval requests
-- `POST /api/users/:id/generate-key` - Forward key generation requests
-- `POST /api/users/:id/reject` - Forward user rejection requests
-- `GET /api/users/:id/key` - Forward key retrieval requests
-- `GET /api/users/:id` - Forward user retrieval requests
-- `GET /api/users` - Forward all users retrieval requests
+#### Submit License Request
+```
+POST /api/license-request
+```
 
-## Configuration
+Submit a new license request.
 
-- `LICENSE_SERVER_URL` - The URL of your license activation server (default: http://localhost:3000)
-- `PORT` - The port to run the middleware server on (default: 4000)
+**Request Body:**
+```json
+{
+  "productKey": "string",
+  "email": "string",
+  "machineId": "string"
+}
+```
 
-## Hosting
+**Response:**
+```json
+{
+  "message": "License request submitted successfully",
+  "requestId": "number"
+}
+```
 
-This server can be hosted independently on any cloud platform that supports Node.js applications, such as:
-- Heroku
-- AWS Elastic Beanstalk
-- Google Cloud Run
-- Azure App Service
-- DigitalOcean App Platform
+#### Check License Result
+```
+GET /api/license-result/:requestId
+```
+
+Check the status and result of a license request.
+
+**Response (Pending):**
+```json
+{
+  "status": "pending",
+  "message": "License request is still being processed"
+}
+```
+
+**Response (Completed):**
+```json
+{
+  "status": "completed",
+  "licenseKey": "string"
+}
+```
+
+### Local Server Endpoints
+
+#### Fetch Pending Requests
+```
+GET /api/pending
+```
+
+Retrieve all pending license requests.
+
+**Response:**
+```json
+[
+  {
+    "id": "number",
+    "timestamp": "date",
+    "method": "string",
+    "url": "string",
+    "headers": "string",
+    "body": "string",
+    "status": "string",
+    "response": "string",
+    "responseStatus": "number"
+  }
+]
+```
+
+#### Resolve Request
+```
+POST /api/resolve
+```
+
+Submit a license key for a processed request.
+
+**Request Body:**
+```json
+{
+  "requestId": "number",
+  "licenseKey": "string"
+}
+```
+
+**Response:**
+```json
+{
+  "message": "License key recorded successfully"
+}
+```
+
+## Health Check
+
+```
+GET /
+GET /health
+```
+
+Check if the server is running.
+
+**Response:**
+```json
+{
+  "message": "License Activation Server is running"
+}
+```
